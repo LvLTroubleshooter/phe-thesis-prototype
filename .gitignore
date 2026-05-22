@@ -1,0 +1,65 @@
+# Markdown planning/docs requested to stay local
+*.md
+
+# Python local environment and caches
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Node dependencies and package manager caches
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Frontend generated output
+frontend/dist/
+frontend/node_modules/
+frontend/.vite/
+
+# Hardhat generated output and local deployment metadata
+blockchain/node_modules/
+blockchain/artifacts/
+blockchain/cache/
+blockchain/deployments/
+frontend/public/deployments/
+
+# Experiment outputs and generated datasets
+results/
+data/
+
+# Local environment and secrets
+.env
+.env.*
+*.local
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Local editor, OS, and tool state
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+.agents/
+.codex/
+
+# Logs and temporary files
+*.log
+tmp/
+temp/
+*.tmp
+*.bak
+*.swp
+*.swo
