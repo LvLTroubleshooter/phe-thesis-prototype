@@ -22,6 +22,9 @@ from src.variants.blockchain.plaintext_blockchain_runner import (
     DEFAULT_EXPERIMENT_BATCH_SIZES,
     DEFAULT_MEASURED_RUNS,
     DEFAULT_WARMUP_RUNS,
+    DEFAULT_CONFIRMATIONS,
+    DEFAULT_SUBMISSION_MODE,
+    SUBMISSION_MODES,
     run_plaintext_blockchain_audit,
 )
 from src.visualization.visualize_plaintext_blockchain_results import (
@@ -67,6 +70,12 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--audit-output", type=Path, default=DEFAULT_BLOCKCHAIN_AUDIT_PATH)
     parser.add_argument("--figures-dir", type=Path, default=DEFAULT_FIGURES_DIR)
     parser.add_argument("--rpc-url", default=None)
+    parser.add_argument("--confirmations", type=int, default=DEFAULT_CONFIRMATIONS)
+    parser.add_argument(
+        "--submission-mode",
+        choices=sorted(SUBMISSION_MODES),
+        default=DEFAULT_SUBMISSION_MODE,
+    )
     parser.add_argument("--batch-sizes", type=int, nargs="+", default=DEFAULT_EXPERIMENT_BATCH_SIZES)
     parser.add_argument("--warmup-runs", type=int, default=DEFAULT_WARMUP_RUNS)
     parser.add_argument("--measured-runs", type=int, default=DEFAULT_MEASURED_RUNS)
@@ -125,6 +134,8 @@ def main(argv: Sequence[str] | None = None) -> None:
             max_price=args.max_price,
             symbol=args.symbol,
             trader_count=args.trader_count,
+            confirmations=args.confirmations,
+            submission_mode=args.submission_mode,
         )
 
         if not args.skip_visualizations:

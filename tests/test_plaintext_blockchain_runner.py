@@ -8,6 +8,7 @@ from src.common.file_hashing import sha256_file
 from src.common.metrics import COMMON_RESULT_COLUMNS
 from src.variants.blockchain import plaintext_blockchain_runner
 from src.variants.blockchain.plaintext_blockchain_runner import (
+    BLOCKCHAIN_AUDIT_COLUMNS,
     DEFAULT_BLOCKCHAIN_RESULTS_PATH,
     DEFAULT_BLOCKCHAIN_TRADES_PATH,
     DEFAULT_BLOCKCHAIN_UNMATCHED_ORDERS_PATH,
@@ -130,8 +131,9 @@ def test_run_plaintext_blockchain_audit_writes_common_schema(
                 "address": "0x1234567890123456789012345678901234567890",
                 "chainId": 31337,
                 "rpcUrl": "http://127.0.0.1:8545",
-                "blockCreationTimeSeconds": 2,
-                "blockGasLimit": 30_000_000,
+                "blockCreationTimeSeconds": 12,
+                "blockGasLimit": 60_000_000,
+                "initialBaseFeePerGas": 1_000_000_000,
             }
         ),
     )
@@ -147,6 +149,26 @@ def test_run_plaintext_blockchain_audit_writes_common_schema(
             "block_number": 7,
             "effective_gas_price": 1000000000,
             "submitter": "0xdeployer",
+            "tx_submission_time_s": 0.1,
+            "tx_submission_to_mined_s": 0.2,
+            "tx_mined_to_confirmed_s": 0.3,
+            "tx_total_confirmation_s": 0.5,
+            "pending_block_distance": 1,
+            "included_block_number": 7,
+            "confirmed_at_block_number": 9,
+            "included_block_timestamp": 111,
+            "confirmed_block_timestamp": 133,
+            "base_fee_per_gas": 1000000000,
+            "max_fee_per_gas": 1000000000,
+            "max_priority_fee_per_gas": 0,
+            "block_gas_limit": 60_000_000,
+            "block_gas_used": 123456,
+            "block_gas_used_percent": 0.2,
+            "transaction_index": 0,
+            "nonce": 0,
+            "target_confirmations": 2,
+            "submission_mode": "sequential",
+            "revert_reason_if_failed": "",
         },
     )
 
@@ -183,6 +205,12 @@ def test_run_plaintext_blockchain_audit_writes_common_schema(
     assert len(saved_results.iloc[0]["input_hash"]) == 64
     assert saved_results.iloc[0]["blockchain_gas_used_total_mean"] == 123456
     assert str(saved_results.iloc[0]["correctness_pass"]).lower() == "true"
+    audit = pd.read_csv(audit_path)
+    assert set(BLOCKCHAIN_AUDIT_COLUMNS).issubset(audit.columns)
+    assert audit.iloc[0]["tx_submission_to_mined_s"] == 0.2
+    assert audit.iloc[0]["tx_mined_to_confirmed_s"] == 0.3
+    assert audit.iloc[0]["confirmed_at_block_number"] == 9
+    assert audit.iloc[0]["submission_mode"] == "sequential"
 
 
 def test_plaintext_blockchain_does_not_need_baseline_results(
@@ -197,8 +225,9 @@ def test_plaintext_blockchain_does_not_need_baseline_results(
                 "address": "0x1234567890123456789012345678901234567890",
                 "chainId": 31337,
                 "rpcUrl": "http://127.0.0.1:8545",
-                "blockCreationTimeSeconds": 2,
-                "blockGasLimit": 30_000_000,
+                "blockCreationTimeSeconds": 12,
+                "blockGasLimit": 60_000_000,
+                "initialBaseFeePerGas": 1_000_000_000,
             }
         ),
     )
@@ -214,6 +243,7 @@ def test_plaintext_blockchain_does_not_need_baseline_results(
             "block_number": 1,
             "effective_gas_price": 0,
             "submitter": "0xdeployer",
+            "submission_mode": "sequential",
         },
     )
 
@@ -245,3 +275,33 @@ def test_missing_blockchain_node_gives_clear_error(tmp_path: Path, monkeypatch: 
 
     with pytest.raises(ConnectionError, match="Start it with"):
         plaintext_blockchain_runner.connect_to_batch_audit(tmp_path / "deployment.json")
+
+
+def test_plaintext_blockchain_rejects_invalid_submission_mode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        plaintext_blockchain_runner,
+        "connect_to_batch_audit",
+        lambda *args, **kwargs: SimpleNamespace(
+            deployment={
+                "address": "0x1234567890123456789012345678901234567890",
+                "chainId": 31337,
+                "rpcUrl": "http://127.0.0.1:8545",
+                "blockCreationTimeSeconds": 12,
+                "blockGasLimit": 60_000_000,
+                "initialBaseFeePerGas": 1_000_000_000,
+            }
+        ),
+    )
+
+    with pytest.raises(ValueError, match="submission_mode"):
+        run_plaintext_blockchain_audit(
+            input_path=tmp_path / "data/synthetic_orders.csv",
+            output_path=tmp_path / "results/plaintext_blockchain/csv/results.csv",
+            batch_sizes=(5,),
+            warmup_runs=0,
+            measured_runs=1,
+            submission_mode="invalid",
+        )

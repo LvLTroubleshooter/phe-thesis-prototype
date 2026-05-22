@@ -13,6 +13,7 @@ type Deployment = {
   miningMode: string;
   blockCreationTimeSeconds: number;
   blockGasLimit: number;
+  initialBaseFeePerGas?: number;
   deployedAt?: string;
   abi: Array<Record<string, unknown>>;
 };
@@ -129,8 +130,9 @@ const fallbackDeploymentInfo: Deployment = {
   chainId: 31337,
   rpcUrl: "http://127.0.0.1:8545",
   miningMode: "interval",
-  blockCreationTimeSeconds: 2,
-  blockGasLimit: 30_000_000,
+  blockCreationTimeSeconds: 12,
+  blockGasLimit: 60_000_000,
+  initialBaseFeePerGas: 1_000_000_000,
   abi: []
 };
 

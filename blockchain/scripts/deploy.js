@@ -31,6 +31,7 @@ async function main() {
     miningMode: prototypeBlockchainConfig.miningMode,
     blockCreationTimeSeconds: prototypeBlockchainConfig.blockCreationTimeMs / 1000,
     blockGasLimit: prototypeBlockchainConfig.blockGasLimit,
+    initialBaseFeePerGas: prototypeBlockchainConfig.initialBaseFeePerGas,
     deployedAt: new Date().toISOString(),
     abi: artifact.abi,
     notes: [
@@ -55,6 +56,9 @@ async function main() {
   console.log(`Network: ${hre.network.name}`);
   console.log(`Chain ID: ${Number(network.chainId)}`);
   console.log(`RPC URL: ${prototypeBlockchainConfig.rpcUrl}`);
+  console.log(`Block creation time: ${prototypeBlockchainConfig.blockCreationTimeMs / 1000}s`);
+  console.log(`Block gas limit: ${prototypeBlockchainConfig.blockGasLimit}`);
+  console.log(`Initial base fee per gas: ${prototypeBlockchainConfig.initialBaseFeePerGas}`);
   console.log(`Deployment details written to ${outputPath}`);
   console.log(`Frontend deployment details written to ${frontendOutputPath}`);
 }
