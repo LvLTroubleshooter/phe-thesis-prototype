@@ -17,6 +17,7 @@ from src.variants.blockchain.plaintext_blockchain_runner import (
     blockchain_record_matches,
     compute_evidence_hashes,
     run_plaintext_blockchain_audit,
+    validate_deployment_on_chain,
 )
 
 
@@ -40,6 +41,26 @@ class FakeBatchRecord:
             hashes["unmatched_orders_file_hash"]
         )
         self.resultRowHash = bytes.fromhex(result_row_hash)
+
+
+class FakeEth:
+    def __init__(self, code: bytes, receipt: dict | None = None, fail_receipt: bool = False) -> None:
+        self._code = code
+        self._receipt = receipt
+        self._fail_receipt = fail_receipt
+
+    def get_code(self, _address: str) -> bytes:
+        return self._code
+
+    def get_transaction_receipt(self, _tx_hash: str) -> dict | None:
+        if self._fail_receipt:
+            raise ValueError("transaction not found")
+        return self._receipt
+
+
+class FakeWeb3:
+    def __init__(self, eth: FakeEth) -> None:
+        self.eth = eth
 
 
 def sample_result_row() -> pd.Series:
@@ -114,6 +135,38 @@ def test_blockchain_record_matches_expected_values() -> None:
     assert blockchain_record_matches(record, row, hashes, result_row_hash)
 
 
+def test_validate_deployment_rejects_stale_contract_address() -> None:
+    deployment = {"deploymentTransactionHash": "0xabc", "deploymentBlockNumber": 1}
+
+    with pytest.raises(RuntimeError, match="no contract code"):
+        validate_deployment_on_chain(
+            FakeWeb3(FakeEth(code=b"")),
+            deployment,
+            "0x1234567890123456789012345678901234567890",
+        )
+
+
+def test_validate_deployment_rejects_missing_deployment_transaction() -> None:
+    deployment = {"deploymentTransactionHash": "0xabc", "deploymentBlockNumber": 1}
+
+    with pytest.raises(RuntimeError, match="Deployment transaction"):
+        validate_deployment_on_chain(
+            FakeWeb3(FakeEth(code=b"\x60", fail_receipt=True)),
+            deployment,
+            "0x1234567890123456789012345678901234567890",
+        )
+
+
+def test_validate_deployment_accepts_matching_code_and_receipt() -> None:
+    deployment = {"deploymentTransactionHash": "0xabc", "deploymentBlockNumber": 7}
+
+    validate_deployment_on_chain(
+        FakeWeb3(FakeEth(code=b"\x60", receipt={"blockNumber": 7})),
+        deployment,
+        "0x1234567890123456789012345678901234567890",
+    )
+
+
 def test_run_plaintext_blockchain_audit_writes_common_schema(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -169,6 +222,9 @@ def test_run_plaintext_blockchain_audit_writes_common_schema(
             "target_confirmations": 2,
             "submission_mode": "sequential",
             "revert_reason_if_failed": "",
+            "error_type": "",
+            "failed_at_stage": "",
+            "tx_hash_if_available": "0xabc",
         },
     )
 
@@ -211,6 +267,8 @@ def test_run_plaintext_blockchain_audit_writes_common_schema(
     assert audit.iloc[0]["tx_mined_to_confirmed_s"] == 0.3
     assert audit.iloc[0]["confirmed_at_block_number"] == 9
     assert audit.iloc[0]["submission_mode"] == "sequential"
+    assert pd.isna(audit.iloc[0]["error_type"]) or audit.iloc[0]["error_type"] == ""
+    assert pd.isna(audit.iloc[0]["failed_at_stage"]) or audit.iloc[0]["failed_at_stage"] == ""
 
 
 def test_plaintext_blockchain_does_not_need_baseline_results(
@@ -244,6 +302,9 @@ def test_plaintext_blockchain_does_not_need_baseline_results(
             "effective_gas_price": 0,
             "submitter": "0xdeployer",
             "submission_mode": "sequential",
+            "error_type": "",
+            "failed_at_stage": "",
+            "tx_hash_if_available": "0xabc",
         },
     )
 

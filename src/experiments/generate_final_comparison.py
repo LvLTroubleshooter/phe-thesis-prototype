@@ -360,12 +360,32 @@ def stacked_runtime(data: pd.DataFrame, output_path: Path) -> Path:
             ("hashing_runtime_s_mean", "hashing"),
             ("blockchain_runtime_s_mean", "blockchain"),
         ]
+        positive_values: list[float] = []
         for column, label in components:
             values = data[column].fillna(0)
+            positive_values.extend(float(value) for value in values if float(value) > 0)
             ax.bar(labels, values, bottom=bottom, label=label)
             bottom = bottom + values
+        if positive_values:
+            min_positive = min(positive_values)
+            max_positive = max(positive_values)
+            if max_positive / min_positive > 100:
+                ax.set_yscale("symlog", linthresh=max(min_positive / 2, 1e-6))
+                ax.set_ylabel("Runtime (s, symlog scale)")
+                ax.text(
+                    0.01,
+                    0.98,
+                    "Symlog scale used so small runtime components remain visible.",
+                    transform=ax.transAxes,
+                    va="top",
+                    fontsize=9,
+                    color="#444",
+                )
+            else:
+                ax.set_ylabel("Runtime (s)")
         ax.legend()
-    ax.set_ylabel("Runtime (s)")
+    if data.empty:
+        ax.set_ylabel("Runtime (s)")
     ax.tick_params(axis="x", rotation=35)
     fig.tight_layout()
     fig.savefig(output_path, dpi=200)

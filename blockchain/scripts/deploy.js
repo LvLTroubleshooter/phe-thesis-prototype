@@ -7,11 +7,13 @@ const {
 } = require("../hardhat.config");
 
 async function main() {
-  const [deployer] = await hre.ethers.getSigners();
+  const [deployer, operator, auditor, viewer] = await hre.ethers.getSigners();
   const network = await hre.ethers.provider.getNetwork();
 
   const batchAudit = await hre.ethers.deployContract("BatchAudit");
   await batchAudit.waitForDeployment();
+  await (await batchAudit.addOperator(operator.address)).wait();
+  await (await batchAudit.addAuditor(auditor.address)).wait();
 
   const address = await batchAudit.getAddress();
   const deploymentTransaction = batchAudit.deploymentTransaction();
@@ -25,6 +27,10 @@ async function main() {
     deploymentTransactionHash: deploymentReceipt?.hash || deploymentTransaction?.hash || "",
     deploymentBlockNumber: deploymentReceipt?.blockNumber || null,
     deployer: deployer.address,
+    ownerAddress: deployer.address,
+    operatorAddress: operator.address,
+    auditorAddress: auditor.address,
+    viewerAddress: viewer.address,
     network: hre.network.name,
     chainId: Number(network.chainId),
     rpcUrl: prototypeBlockchainConfig.rpcUrl,
@@ -55,6 +61,10 @@ async function main() {
   console.log(`BatchAudit deployed to ${address}`);
   console.log(`Network: ${hre.network.name}`);
   console.log(`Chain ID: ${Number(network.chainId)}`);
+  console.log(`Owner address: ${deployer.address}`);
+  console.log(`Operator address: ${operator.address}`);
+  console.log(`Auditor address: ${auditor.address}`);
+  console.log(`Viewer address: ${viewer.address}`);
   console.log(`RPC URL: ${prototypeBlockchainConfig.rpcUrl}`);
   console.log(`Block creation time: ${prototypeBlockchainConfig.blockCreationTimeMs / 1000}s`);
   console.log(`Block gas limit: ${prototypeBlockchainConfig.blockGasLimit}`);

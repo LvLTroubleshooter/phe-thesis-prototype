@@ -7,6 +7,10 @@ type Deployment = {
   deploymentTransactionHash?: string;
   deploymentBlockNumber?: number | null;
   deployer?: string;
+  ownerAddress?: string;
+  operatorAddress?: string;
+  auditorAddress?: string;
+  viewerAddress?: string;
   network?: string;
   chainId?: number;
   rpcUrl: string;
@@ -70,6 +74,48 @@ type TransactionRow = {
   rawReceipt: unknown;
 };
 
+type RoleAccount = {
+  role: string;
+  address: string;
+  balance: string;
+  isOwner: boolean;
+  isOperator: boolean;
+  isAuditor: boolean;
+};
+
+type LifecycleEvent = {
+  eventName: string;
+  contractAddress: string;
+  transactionHash: string;
+  blockNumber: number;
+  logIndex: number;
+  timestamp: number;
+  variant: string;
+  batchId: string;
+  commitmentHash: string;
+  operator: string;
+  raw: unknown;
+};
+
+type BatchLifecycle = {
+  key: string;
+  variant: string;
+  batchId: string;
+  batchCommitment: string;
+  resultCommitment: string;
+  cancelReasonHash: string;
+  status: string;
+  openedBy: string;
+  closedBy: string;
+  auditedBy: string;
+  cancelledBy: string;
+  openedAt: number;
+  closedAt: number;
+  auditedAt: number;
+  cancelledAt: number;
+  exists: boolean;
+};
+
 type AuditRecord = {
   key: string;
   variant: string;
@@ -116,8 +162,12 @@ type ExplorerState = {
   latestBlockTimestamp: number | null;
   blocks: BlockRow[];
   transactions: TransactionRow[];
+  pendingTransactions: TransactionRow[];
+  roleAccounts: RoleAccount[];
+  batchLifecycles: BatchLifecycle[];
   auditRecords: AuditRecord[];
   auditEvents: AuditEvent[];
+  lifecycleEvents: LifecycleEvent[];
   bytecodeDetected: boolean;
   error: string | null;
   lastUpdated: string | null;
@@ -141,6 +191,7 @@ const BLOCK_SCAN_LIMIT = 80;
 const TRANSACTION_ROW_LIMIT = 40;
 const DEPLOYMENT_METADATA_URL = "/deployments/BatchAudit.localhost.json";
 const ZERO_HASH = "0x0000000000000000000000000000000000000000000000000000000000000000";
+const BATCH_STATUS_LABELS = ["None", "Opened", "Closed", "Audited", "Cancelled"];
 
 const initialState: ExplorerState = {
   connected: false,
@@ -150,8 +201,12 @@ const initialState: ExplorerState = {
   latestBlockTimestamp: null,
   blocks: [],
   transactions: [],
+  pendingTransactions: [],
+  roleAccounts: [],
+  batchLifecycles: [],
   auditRecords: [],
   auditEvents: [],
+  lifecycleEvents: [],
   bytecodeDetected: false,
   error: null,
   lastUpdated: null
@@ -170,6 +225,12 @@ function formatNumber(value: bigint | number | string): string {
   const numeric = Number(value);
   if (!Number.isFinite(numeric)) return "n/a";
   return Intl.NumberFormat("en-US").format(numeric);
+}
+
+function formatWei(value: bigint | number | string): string {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return "n/a";
+  return `${(numeric / 1e18).toFixed(4)} ETH`;
 }
 
 function formatPercent(value: number): string {
@@ -232,6 +293,10 @@ function statusForHashes(record: AuditRecord): string {
     : "Not available";
 }
 
+function statusLabel(value: bigint | number): string {
+  return BATCH_STATUS_LABELS[Number(value)] ?? `Unknown (${String(value)})`;
+}
+
 async function loadDeploymentInfo(): Promise<Deployment> {
   const response = await fetch(`${DEPLOYMENT_METADATA_URL}?t=${Date.now()}`, {
     cache: "no-store"
@@ -283,12 +348,128 @@ function decodeTransaction(contract: Contract, tx: TransactionResponse) {
         value: safeString(decoded.args[index])
       })),
       relatedBatchId:
-        decoded.name === "recordBatchAudit" && decoded.args.length > 1
+        ["openBatch", "closeBatch", "recordBatchAudit", "cancelBatch"].includes(decoded.name) && decoded.args.length > 1
           ? safeString(decoded.args[1])
           : ""
     };
   } catch {
     return { method: tx.to ? "contract call" : "contract creation", args: [], relatedBatchId: "" };
+  }
+}
+
+async function getRoleAccounts(
+  provider: JsonRpcProvider,
+  contract: Contract,
+  deployment: Deployment
+): Promise<RoleAccount[]> {
+  const candidates = [
+    ["Owner", deployment.ownerAddress || deployment.deployer || ""],
+    ["Operator", deployment.operatorAddress || ""],
+    ["Auditor", deployment.auditorAddress || ""],
+    ["Viewer", deployment.viewerAddress || ""]
+  ].filter(([, address]) => address);
+  const seen = new Set<string>();
+  const rows: RoleAccount[] = [];
+
+  for (const [role, address] of candidates) {
+    const checksum = address;
+    const key = checksum.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    let isOwner = false;
+    let isOperator = false;
+    let isAuditor = false;
+    try {
+      isOwner = (await contract.owner()).toLowerCase() === key;
+    } catch {
+      isOwner = role === "Owner";
+    }
+    try {
+      isOperator = Boolean(await contract.operators(checksum));
+    } catch {
+      isOperator = role === "Operator";
+    }
+    try {
+      isAuditor = Boolean(await contract.auditors(checksum));
+    } catch {
+      isAuditor = role === "Auditor";
+    }
+
+    rows.push({
+      role,
+      address: checksum,
+      balance: (await provider.getBalance(checksum)).toString(),
+      isOwner,
+      isOperator,
+      isAuditor
+    });
+  }
+
+  return rows;
+}
+
+async function getPendingTransactions(
+  provider: JsonRpcProvider,
+  contract: Contract
+): Promise<TransactionRow[]> {
+  try {
+    const content = await provider.send("txpool_content", []);
+    const pending = content?.pending ?? {};
+    const rows: TransactionRow[] = [];
+
+    Object.entries(pending as Record<string, Record<string, unknown>>).forEach(([from, byNonce]) => {
+      Object.entries(byNonce).forEach(([nonce, txValue]) => {
+        const tx = txValue as {
+          hash?: string;
+          to?: string;
+          input?: string;
+          data?: string;
+          gas?: string;
+          gasPrice?: string;
+          maxFeePerGas?: string;
+          maxPriorityFeePerGas?: string;
+        };
+        const syntheticTx = {
+          hash: tx.hash ?? `${from}-${nonce}`,
+          from,
+          to: tx.to ?? "contract creation",
+          data: tx.input ?? tx.data ?? "0x",
+          value: 0n,
+          gasLimit: BigInt(tx.gas ?? "0"),
+          gasPrice: BigInt(tx.gasPrice ?? tx.maxFeePerGas ?? "0"),
+          nonce: Number(nonce),
+          index: 0
+        } as TransactionResponse;
+        const decoded = decodeTransaction(contract, syntheticTx);
+        rows.push({
+          hash: syntheticTx.hash,
+          method: decoded.method,
+          status: "Pending",
+          blockNumber: 0,
+          timestamp: 0,
+          from,
+          to: tx.to ?? "contract creation",
+          contractAddress: "",
+          gasUsed: "0",
+          gasLimit: syntheticTx.gasLimit.toString(),
+          effectiveGasPrice: syntheticTx.gasPrice?.toString() ?? "0",
+          transactionFee: "0",
+          nonce: Number(nonce),
+          transactionIndex: 0,
+          logsCount: 0,
+          relatedBatchId: decoded.relatedBatchId,
+          inputPreview: syntheticTx.data && syntheticTx.data !== "0x" ? `${syntheticTx.data.slice(0, 34)}...` : "0x",
+          decodedArguments: decoded.args,
+          rawTransaction: tx,
+          rawReceipt: {}
+        });
+      });
+    });
+
+    return rows;
+  } catch {
+    return [];
   }
 }
 
@@ -465,6 +646,61 @@ async function getAuditEvents(contract: Contract, blocks: BlockRow[]): Promise<A
   return mapped.filter((event): event is AuditEvent => event !== null).reverse();
 }
 
+async function eventTimestamp(
+  provider: JsonRpcProvider,
+  timestamps: Map<number, number>,
+  blockNumber: number
+): Promise<number> {
+  const cached = timestamps.get(blockNumber);
+  if (cached) return cached;
+  const block = await provider.getBlock(blockNumber);
+  return block?.timestamp ?? 0;
+}
+
+async function getLifecycleEvents(
+  provider: JsonRpcProvider,
+  contract: Contract,
+  blocks: BlockRow[]
+): Promise<LifecycleEvent[]> {
+  const timestamps = new Map(blocks.map((block) => [block.number, block.timestamp]));
+  const eventNames = ["BatchOpened", "BatchClosed", "BatchCancelled"];
+  const eventRows = await Promise.all(
+    eventNames.map(async (eventName) => {
+      try {
+        const filter = contract.filters[eventName]();
+        const events = await contract.queryFilter(filter, 0, "latest");
+        return Promise.all(
+          events.map(async (event) => {
+            const fallback = contract.interface.parseLog(event) as LogDescription | null;
+            const args = "args" in event && event.args ? event.args : fallback?.args;
+            if (!args) return null;
+            return {
+              eventName,
+              contractAddress: event.address,
+              transactionHash: event.transactionHash,
+              blockNumber: event.blockNumber,
+              logIndex: event.index,
+              timestamp: await eventTimestamp(provider, timestamps, event.blockNumber),
+              variant: safeString(args.variant),
+              batchId: safeString(args.batchId),
+              commitmentHash: safeString(args.batchCommitment ?? args.resultCommitment ?? args.reasonHash),
+              operator: safeString(args.operator),
+              raw: event as unknown
+            };
+          })
+        );
+      } catch {
+        return [];
+      }
+    })
+  );
+
+  return eventRows
+    .flat()
+    .filter((event): event is LifecycleEvent => event !== null)
+    .sort((left, right) => right.blockNumber - left.blockNumber || right.logIndex - left.logIndex);
+}
+
 async function getAuditRecords(
   contract: Contract,
   events: AuditEvent[],
@@ -502,6 +738,40 @@ async function getAuditRecords(
     };
     row.verificationStatus = statusForHashes(row) === "Recorded on-chain" ? "Not verified locally" : "Not available";
     rows.push(row);
+  }
+
+  return rows;
+}
+
+async function getBatchLifecycles(contract: Contract): Promise<BatchLifecycle[]> {
+  const count = Number(await contract.getRecordCount());
+  const rows: BatchLifecycle[] = [];
+
+  for (let index = 0; index < count; index += 1) {
+    const key = await contract.getRecordKey(index);
+    try {
+      const lifecycle = await contract.getBatchLifecycleByKey(key);
+      rows.push({
+        key,
+        variant: lifecycle.variant,
+        batchId: lifecycle.batchId,
+        batchCommitment: lifecycle.batchCommitment,
+        resultCommitment: lifecycle.resultCommitment,
+        cancelReasonHash: lifecycle.cancelReasonHash,
+        status: statusLabel(lifecycle.status),
+        openedBy: lifecycle.openedBy,
+        closedBy: lifecycle.closedBy,
+        auditedBy: lifecycle.auditedBy,
+        cancelledBy: lifecycle.cancelledBy,
+        openedAt: Number(lifecycle.openedAt),
+        closedAt: Number(lifecycle.closedAt),
+        auditedAt: Number(lifecycle.auditedAt),
+        cancelledAt: Number(lifecycle.cancelledAt),
+        exists: Boolean(lifecycle.exists)
+      });
+    } catch {
+      // Older deployment metadata may point to a contract without lifecycle reads.
+    }
   }
 
   return rows;
@@ -549,6 +819,13 @@ export default function App() {
         warnings.push(`Audit events could not be loaded: ${error instanceof Error ? error.message : safeString(error)}`);
       }
 
+      let lifecycleEvents: LifecycleEvent[] = [];
+      try {
+        lifecycleEvents = await getLifecycleEvents(provider, contract, blocks);
+      } catch (error) {
+        warnings.push(`Batch lifecycle events could not be loaded: ${error instanceof Error ? error.message : safeString(error)}`);
+      }
+
       let auditRecords: AuditRecord[] = [];
       try {
         auditRecords = await getAuditRecords(contract, auditEvents, blocks);
@@ -556,11 +833,32 @@ export default function App() {
         warnings.push(`Audit records could not be loaded: ${error instanceof Error ? error.message : safeString(error)}`);
       }
 
+      let batchLifecycles: BatchLifecycle[] = [];
+      try {
+        batchLifecycles = await getBatchLifecycles(contract);
+      } catch (error) {
+        warnings.push(`Batch lifecycle state could not be loaded: ${error instanceof Error ? error.message : safeString(error)}`);
+      }
+
       let transactions: TransactionRow[] = [];
       try {
         transactions = await getLatestTransactions(provider, contract, currentBlockNumber, auditEvents, activeDeployment);
       } catch (error) {
         warnings.push(`Transactions could not be loaded: ${error instanceof Error ? error.message : safeString(error)}`);
+      }
+
+      let pendingTransactions: TransactionRow[] = [];
+      try {
+        pendingTransactions = await getPendingTransactions(provider, contract);
+      } catch {
+        pendingTransactions = [];
+      }
+
+      let roleAccounts: RoleAccount[] = [];
+      try {
+        roleAccounts = await getRoleAccounts(provider, contract, activeDeployment);
+      } catch (error) {
+        warnings.push(`Role accounts could not be loaded: ${error instanceof Error ? error.message : safeString(error)}`);
       }
 
       setState({
@@ -571,8 +869,12 @@ export default function App() {
         latestBlockTimestamp: latestBlock?.timestamp ?? null,
         blocks,
         transactions,
+        pendingTransactions,
+        roleAccounts,
+        batchLifecycles,
         auditRecords,
         auditEvents,
+        lifecycleEvents,
         bytecodeDetected: bytecode !== "0x",
         error: warnings.length ? warnings.join(" ") : null,
         lastUpdated: new Date().toLocaleTimeString()
@@ -608,7 +910,8 @@ export default function App() {
     [state.transactions]
   );
 
-  const filteredTransactions = state.transactions.filter(
+  const allTransactionRows = [...state.pendingTransactions, ...state.transactions];
+  const filteredTransactions = allTransactionRows.filter(
     (tx) =>
       (txStatusFilter === "all" || tx.status === txStatusFilter) &&
       (txMethodFilter === "all" || tx.method === txMethodFilter)
@@ -645,7 +948,7 @@ export default function App() {
       return;
     }
 
-    const tx = state.transactions.find(
+    const tx = allTransactionRows.find(
       (item) =>
         item.hash.toLowerCase() === value ||
         item.from.toLowerCase() === value ||
@@ -783,7 +1086,7 @@ export default function App() {
           {activeTab === "transactions" && (
             <TransactionsPage
               rows={filteredTransactions}
-              allRows={state.transactions}
+              allRows={allTransactionRows}
               statusFilter={txStatusFilter}
               methodFilter={txMethodFilter}
               setStatusFilter={setTxStatusFilter}
@@ -802,6 +1105,7 @@ export default function App() {
             <BatchRecordsPage
               rows={filteredRecords}
               allRows={state.auditRecords}
+              lifecycles={state.batchLifecycles}
               variantFilter={recordVariantFilter}
               batchFilter={recordBatchFilter}
               setVariantFilter={setRecordVariantFilter}
@@ -813,6 +1117,7 @@ export default function App() {
             <EventsPage
               rows={filteredEvents}
               allRows={state.auditEvents}
+              lifecycleRows={state.lifecycleEvents}
               variantFilter={eventVariantFilter}
               search={eventSearch}
               setVariantFilter={setEventVariantFilter}
@@ -862,8 +1167,10 @@ function Overview({
         <Metric label="Latest gas used" value={latestBlock ? formatNumber(latestBlock.gasUsed) : "n/a"} />
         <Metric label="Scanned blocks" value={state.blocks.length} />
         <Metric label="Transactions found" value={state.transactions.length} />
+        <Metric label="Pending txs" value={state.pendingTransactions.length} status={state.pendingTransactions.length ? "Pending" : "neutral"} />
         <Metric label="Audit records" value={state.auditRecords.length} />
         <Metric label="Audit events" value={state.auditEvents.length} />
+        <Metric label="Lifecycle events" value={state.lifecycleEvents.length} />
         <Metric label="Contract address" value={shortHash(deploymentInfo.address)} mono copyValue={deploymentInfo.address} />
         <Metric label="Deployment block" value={getDeploymentBlockNumber(state.bytecodeDetected, deploymentTx)} />
       </section>
@@ -918,6 +1225,34 @@ function Overview({
         </ExplorerTable>
       </section>
 
+      <section className="activity-grid">
+        <ExplorerTable title="Pending Transactions">
+          <thead>
+            <tr>
+              <th>Transaction</th>
+              <th>Method</th>
+              <th>From</th>
+              <th>Gas limit</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            {state.pendingTransactions.slice(0, 6).map((tx) => (
+              <tr key={`${tx.hash}-${tx.nonce}`} onClick={() => onTx(tx)}>
+                <td><Hash value={tx.hash} /></td>
+                <td><MethodBadge value={tx.method} /></td>
+                <td><Hash value={tx.from} /></td>
+                <td>{formatNumber(tx.gasLimit)}</td>
+                <td><StatusBadge value="Pending" /></td>
+              </tr>
+            ))}
+            {!state.pendingTransactions.length && <EmptyRow columns={5} label="No pending transactions currently reported by the local node." />}
+          </tbody>
+        </ExplorerTable>
+
+        <GasUsagePanel blocks={state.blocks.slice(0, 12).reverse()} />
+      </section>
+
       <ExplorerTable title="Latest Audit Events">
         <thead>
           <tr>
@@ -941,6 +1276,34 @@ function Overview({
             </tr>
           ))}
           {!state.auditEvents.length && <EmptyRow columns={6} label="No BatchAuditRecorded events found." />}
+        </tbody>
+      </ExplorerTable>
+
+      <ExplorerTable title="Batch Lifecycle Timeline">
+        <thead>
+          <tr>
+            <th>Event</th>
+            <th>Variant</th>
+            <th>Batch ID</th>
+            <th>Block</th>
+            <th>Operator</th>
+            <th>Commitment</th>
+            <th>Transaction</th>
+          </tr>
+        </thead>
+        <tbody>
+          {state.lifecycleEvents.slice(0, 10).map((event) => (
+            <tr key={`${event.transactionHash}-${event.logIndex}`}>
+              <td><MethodBadge value={event.eventName} /></td>
+              <td>{event.variant}</td>
+              <td>{event.batchId}</td>
+              <td>{event.blockNumber}</td>
+              <td><Hash value={event.operator} /></td>
+              <td><Hash value={event.commitmentHash} /></td>
+              <td><Hash value={event.transactionHash} /></td>
+            </tr>
+          ))}
+          {!state.lifecycleEvents.length && <EmptyRow columns={7} label="No lifecycle events found yet." />}
         </tbody>
       </ExplorerTable>
     </>
@@ -1104,6 +1467,10 @@ function ContractPage({
         <div className="metric-grid compact">
           <Metric label="Contract address" value={shortHash(deploymentInfo.address)} copyValue={deploymentInfo.address} mono />
           <Metric label="Deployer" value={shortHash(deploymentInfo.deployer)} copyValue={deploymentInfo.deployer} mono />
+          <Metric label="Owner" value={shortHash(deploymentInfo.ownerAddress || deploymentInfo.deployer)} copyValue={deploymentInfo.ownerAddress || deploymentInfo.deployer} mono />
+          <Metric label="Operator" value={shortHash(deploymentInfo.operatorAddress)} copyValue={deploymentInfo.operatorAddress} mono />
+          <Metric label="Auditor" value={shortHash(deploymentInfo.auditorAddress)} copyValue={deploymentInfo.auditorAddress} mono />
+          <Metric label="Viewer" value={shortHash(deploymentInfo.viewerAddress)} copyValue={deploymentInfo.viewerAddress} mono />
           <Metric
             label="Deployment transaction"
             value={deploymentInfo.deploymentTransactionHash ? shortHash(deploymentInfo.deploymentTransactionHash) : deploymentTx ? shortHash(deploymentTx.hash) : "not found"}
@@ -1119,6 +1486,32 @@ function ContractPage({
           <Metric label="Emitted events" value={state.auditEvents.length} />
         </div>
       </section>
+
+      <ExplorerTable title="Configured Accounts And Roles">
+        <thead>
+          <tr>
+            <th>Configured role</th>
+            <th>Address</th>
+            <th>Balance</th>
+            <th>Owner</th>
+            <th>Operator</th>
+            <th>Auditor</th>
+          </tr>
+        </thead>
+        <tbody>
+          {state.roleAccounts.map((account) => (
+            <tr key={account.address}>
+              <td>{account.role}</td>
+              <td><Hash value={account.address} /></td>
+              <td>{formatWei(account.balance)}</td>
+              <td><StatusBadge value={account.isOwner ? "Owner" : "No"} /></td>
+              <td><StatusBadge value={account.isOperator ? "Operator" : "No"} /></td>
+              <td><StatusBadge value={account.isAuditor ? "Auditor" : "No"} /></td>
+            </tr>
+          ))}
+          {!state.roleAccounts.length && <EmptyRow columns={6} label="No role account metadata available. Redeploy BatchAudit to refresh named identities." />}
+        </tbody>
+      </ExplorerTable>
 
       <section className="subtabs">
         <div>
@@ -1168,6 +1561,36 @@ function ContractPage({
             ))}
         </tbody>
       </ExplorerTable>
+
+      <ExplorerTable title="Batch Lifecycle State">
+        <thead>
+          <tr>
+            <th>Variant</th>
+            <th>Batch ID</th>
+            <th>Status</th>
+            <th>Opened by</th>
+            <th>Closed by</th>
+            <th>Audited by</th>
+            <th>Batch commitment</th>
+            <th>Result commitment</th>
+          </tr>
+        </thead>
+        <tbody>
+          {state.batchLifecycles.map((lifecycle) => (
+            <tr key={lifecycle.key}>
+              <td>{lifecycle.variant}</td>
+              <td>{lifecycle.batchId}</td>
+              <td><StatusBadge value={lifecycle.status} /></td>
+              <td><Hash value={lifecycle.openedBy} /></td>
+              <td><Hash value={lifecycle.closedBy} /></td>
+              <td><Hash value={lifecycle.auditedBy} /></td>
+              <td><Hash value={lifecycle.batchCommitment} /></td>
+              <td><Hash value={lifecycle.resultCommitment} /></td>
+            </tr>
+          ))}
+          {!state.batchLifecycles.length && <EmptyRow columns={8} label="No batch lifecycle records available yet." />}
+        </tbody>
+      </ExplorerTable>
     </Panel>
   );
 }
@@ -1175,6 +1598,7 @@ function ContractPage({
 function BatchRecordsPage({
   rows,
   allRows,
+  lifecycles,
   variantFilter,
   batchFilter,
   setVariantFilter,
@@ -1183,6 +1607,7 @@ function BatchRecordsPage({
 }: {
   rows: AuditRecord[];
   allRows: AuditRecord[];
+  lifecycles: BatchLifecycle[];
   variantFilter: string;
   batchFilter: string;
   setVariantFilter: (value: string) => void;
@@ -1190,6 +1615,7 @@ function BatchRecordsPage({
   onSelect: (record: AuditRecord) => void;
 }) {
   const variants = Array.from(new Set(allRows.map((record) => record.variant)));
+  const lifecycleByBatch = new Map(lifecycles.map((item) => [`${item.variant}:${item.batchId}`, item]));
   return (
     <Panel title="Batch Records">
       <div className="filters">
@@ -1215,7 +1641,8 @@ function BatchRecordsPage({
             <th>Recorded block</th>
             <th>Transaction hash</th>
             <th>Submitter</th>
-            <th>Status</th>
+            <th>Lifecycle</th>
+            <th>Verification</th>
             <th>Result row hash</th>
           </tr>
         </thead>
@@ -1232,7 +1659,8 @@ function BatchRecordsPage({
               <td>{record.recordedBlock}</td>
               <td><Hash value={record.transactionHash} /></td>
               <td><Hash value={record.submitter} /></td>
-              <td><StatusBadge value="Recorded" /></td>
+              <td><StatusBadge value={lifecycleByBatch.get(`${record.variant}:${record.batchId}`)?.status ?? "Recorded"} /></td>
+              <td><StatusBadge value={record.verificationStatus} /></td>
               <td><Hash value={record.resultRowHash} /></td>
             </tr>
           ))}
@@ -1246,6 +1674,7 @@ function BatchRecordsPage({
 function EventsPage({
   rows,
   allRows,
+  lifecycleRows,
   variantFilter,
   search,
   setVariantFilter,
@@ -1254,6 +1683,7 @@ function EventsPage({
 }: {
   rows: AuditEvent[];
   allRows: AuditEvent[];
+  lifecycleRows: LifecycleEvent[];
   variantFilter: string;
   search: string;
   setVariantFilter: (value: string) => void;
@@ -1306,6 +1736,36 @@ function EventsPage({
             </tr>
           ))}
           {!rows.length && <EmptyRow columns={11} label="No decoded events match the current filters." />}
+        </tbody>
+      </ExplorerTable>
+
+      <ExplorerTable title={`Lifecycle Events (${lifecycleRows.length})`}>
+        <thead>
+          <tr>
+            <th>Event name</th>
+            <th>Variant</th>
+            <th>Batch ID</th>
+            <th>Block</th>
+            <th>Operator</th>
+            <th>Commitment / reason</th>
+            <th>Transaction hash</th>
+            <th>Timestamp</th>
+          </tr>
+        </thead>
+        <tbody>
+          {lifecycleRows.map((event) => (
+            <tr key={`${event.transactionHash}-${event.logIndex}-lifecycle`}>
+              <td><MethodBadge value={event.eventName} /></td>
+              <td>{event.variant}</td>
+              <td>{event.batchId}</td>
+              <td>{event.blockNumber}</td>
+              <td><Hash value={event.operator} /></td>
+              <td><Hash value={event.commitmentHash} /></td>
+              <td><Hash value={event.transactionHash} /></td>
+              <td>{formatTimestamp(event.timestamp)}</td>
+            </tr>
+          ))}
+          {!lifecycleRows.length && <EmptyRow columns={8} label="No lifecycle events found." />}
         </tbody>
       </ExplorerTable>
     </Panel>
@@ -1435,6 +1895,35 @@ function DetailPanel({ detail, onClose }: { detail: Detail; onClose: () => void 
   );
 }
 
+function GasUsagePanel({ blocks }: { blocks: BlockRow[] }) {
+  const maxGas = Math.max(...blocks.map((block) => Number(block.gasUsed)), 1);
+  return (
+    <section className="table-section">
+      <div className="table-heading">
+        <h2>Gas Used Per Block</h2>
+      </div>
+      <div className="gas-chart" aria-label="Gas used per block">
+        {blocks.map((block) => {
+          const gasUsed = Number(block.gasUsed);
+          return (
+            <div key={`gas-${block.number}`} className="gas-bar-row">
+              <span className="mono">#{block.number}</span>
+              <div className="gas-track">
+                <div
+                  className={block.transactionCount ? "gas-bar active" : "gas-bar"}
+                  style={{ width: `${Math.max((gasUsed / maxGas) * 100, block.transactionCount ? 4 : 1)}%` }}
+                />
+              </div>
+              <span>{formatNumber(block.gasUsed)}</span>
+            </div>
+          );
+        })}
+        {!blocks.length && <p className="empty-inline">No block gas data available.</p>}
+      </div>
+    </section>
+  );
+}
+
 function Metric({
   label,
   value,
@@ -1517,11 +2006,11 @@ function CopyButton({ value }: { value: string }) {
 function StatusBadge({ value }: { value: string }) {
   const normalized = value.toLowerCase();
   const className =
-    normalized.includes("success") || normalized.includes("connected") || normalized.includes("recorded") || normalized.includes("found")
+    normalized.includes("success") || normalized.includes("connected") || normalized.includes("recorded") || normalized.includes("found") || normalized.includes("audited") || normalized.includes("operator") || normalized.includes("owner")
       ? "success"
-      : normalized.includes("failed") || normalized.includes("mismatch") || normalized.includes("disconnected")
+      : normalized.includes("failed") || normalized.includes("mismatch") || normalized.includes("disconnected") || normalized.includes("cancelled")
         ? "failed"
-        : normalized.includes("not verified") || normalized.includes("pending")
+        : normalized.includes("not verified") || normalized.includes("pending") || normalized.includes("opened") || normalized.includes("closed") || normalized.includes("auditor")
           ? "warning"
           : "neutral";
   return <span className={`status-badge ${className}`}>{value}</span>;

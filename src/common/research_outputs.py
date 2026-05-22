@@ -132,6 +132,9 @@ BLOCKCHAIN_AUDIT_COLUMNS = [
     "target_confirmations",
     "submission_mode",
     "revert_reason_if_failed",
+    "error_type",
+    "failed_at_stage",
+    "tx_hash_if_available",
     "status",
     "created_at",
 ]

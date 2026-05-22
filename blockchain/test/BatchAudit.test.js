@@ -24,6 +24,16 @@ function validRecord(overrides = {}) {
 }
 
 async function recordBatch(batchAudit, record) {
+  await (await batchAudit.openBatch(
+    record.variant,
+    record.batchId,
+    record.ordersFileHash
+  )).wait();
+  await (await batchAudit.closeBatch(
+    record.variant,
+    record.batchId,
+    record.resultRowHash
+  )).wait();
   return batchAudit.recordBatchAudit(
     record.variant,
     record.batchId,
@@ -45,15 +55,140 @@ describe("BatchAudit", function () {
   });
 
   async function deployBatchAudit() {
-    const [owner, otherSubmitter] = await ethers.getSigners();
+    const [owner, operator, auditor, otherSubmitter] = await ethers.getSigners();
     const batchAudit = await ethers.deployContract("BatchAudit");
     await batchAudit.waitForDeployment();
-    return { batchAudit, owner, otherSubmitter };
+    return { batchAudit, owner, operator, auditor, otherSubmitter };
   }
 
   it("deploys", async function () {
-    const { batchAudit } = await deployBatchAudit();
+    const { batchAudit, owner } = await deployBatchAudit();
     expect(await batchAudit.getAddress()).to.match(/^0x[a-fA-F0-9]{40}$/);
+    expect(await batchAudit.owner()).to.equal(owner.address);
+    expect(await batchAudit.operators(owner.address)).to.equal(true);
+    expect(await batchAudit.auditors(owner.address)).to.equal(true);
+  });
+
+  it("owner can add and remove operators and auditors", async function () {
+    const { batchAudit, operator, auditor } = await deployBatchAudit();
+
+    await expect(batchAudit.addOperator(operator.address))
+      .to.emit(batchAudit, "OperatorAdded")
+      .withArgs(operator.address);
+    await expect(batchAudit.addAuditor(auditor.address))
+      .to.emit(batchAudit, "AuditorAdded")
+      .withArgs(auditor.address);
+
+    expect(await batchAudit.operators(operator.address)).to.equal(true);
+    expect(await batchAudit.auditors(auditor.address)).to.equal(true);
+
+    await expect(batchAudit.removeOperator(operator.address))
+      .to.emit(batchAudit, "OperatorRemoved")
+      .withArgs(operator.address);
+    await expect(batchAudit.removeAuditor(auditor.address))
+      .to.emit(batchAudit, "AuditorRemoved")
+      .withArgs(auditor.address);
+
+    expect(await batchAudit.operators(operator.address)).to.equal(false);
+    expect(await batchAudit.auditors(auditor.address)).to.equal(false);
+  });
+
+  it("rejects role changes from non-owner accounts", async function () {
+    const { batchAudit, operator, otherSubmitter } = await deployBatchAudit();
+
+    await expect(
+      batchAudit.connect(otherSubmitter).addOperator(operator.address)
+    ).to.be.revertedWith("owner only");
+  });
+
+  it("records the opened and closed batch lifecycle", async function () {
+    const { batchAudit, owner } = await deployBatchAudit();
+    const input = validRecord();
+
+    await expect(batchAudit.openBatch(input.variant, input.batchId, input.ordersFileHash))
+      .to.emit(batchAudit, "BatchOpened")
+      .withArgs(input.variant, input.batchId, input.ordersFileHash, owner.address, anyValue, anyValue);
+    expect(await batchAudit.getBatchStatus(input.variant, input.batchId)).to.equal(1n);
+
+    await expect(batchAudit.closeBatch(input.variant, input.batchId, input.resultRowHash))
+      .to.emit(batchAudit, "BatchClosed")
+      .withArgs(input.variant, input.batchId, input.resultRowHash, owner.address, anyValue, anyValue);
+    expect(await batchAudit.getBatchStatus(input.variant, input.batchId)).to.equal(2n);
+  });
+
+  it("rejects audit writes from unauthorized accounts", async function () {
+    const { batchAudit, otherSubmitter } = await deployBatchAudit();
+    const input = validRecord();
+
+    await (await batchAudit.openBatch(input.variant, input.batchId, input.ordersFileHash)).wait();
+    await (await batchAudit.closeBatch(input.variant, input.batchId, input.resultRowHash)).wait();
+
+    await expect(batchAudit.connect(otherSubmitter).recordBatchAudit(
+      input.variant,
+      input.batchId,
+      input.batchSize,
+      input.buyVolume,
+      input.sellVolume,
+      input.matchedVolume,
+      input.executedTradeCount,
+      input.ordersFileHash,
+      input.tradesFileHash,
+      input.unmatchedOrdersFileHash,
+      input.resultRowHash
+    )).to.be.revertedWith("operator only");
+  });
+
+  it("rejects opening a batch with an empty commitment", async function () {
+    const { batchAudit } = await deployBatchAudit();
+    const input = validRecord();
+
+    await expect(batchAudit.openBatch(
+      input.variant,
+      input.batchId,
+      ethers.ZeroHash
+    )).to.be.revertedWith("batchCommitment is required");
+  });
+
+  it("rejects auditing a closed batch twice", async function () {
+    const { batchAudit } = await deployBatchAudit();
+    const input = validRecord();
+
+    await (await recordBatch(batchAudit, input)).wait();
+
+    await expect(batchAudit.recordBatchAudit(
+      input.variant,
+      input.batchId,
+      input.batchSize,
+      input.buyVolume,
+      input.sellVolume,
+      input.matchedVolume,
+      input.executedTradeCount,
+      input.ordersFileHash,
+      input.tradesFileHash,
+      input.unmatchedOrdersFileHash,
+      input.resultRowHash
+    )).to.be.revertedWith("audit record already exists");
+  });
+
+  it("rejects auditing before a batch is closed", async function () {
+    const { batchAudit } = await deployBatchAudit();
+    const input = validRecord();
+
+    await (await batchAudit.openBatch(input.variant, input.batchId, input.ordersFileHash)).wait();
+
+    await expect(batchAudit.recordBatchAudit(
+      input.variant,
+      input.batchId,
+      input.batchSize,
+      input.buyVolume,
+      input.sellVolume,
+      input.matchedVolume,
+      input.executedTradeCount,
+      input.ordersFileHash,
+      input.tradesFileHash,
+      input.unmatchedOrdersFileHash,
+      input.resultRowHash
+    )).to.be.revertedWith("batch is not closed");
   });
 
   it("recordBatchAudit stores a valid audit record", async function () {
@@ -79,6 +214,7 @@ describe("BatchAudit", function () {
     expect(record.submitter).to.equal(owner.address);
     expect(record.recordedBlock).to.equal(BigInt(receipt.blockNumber));
     expect(record.exists).to.equal(true);
+    expect(await batchAudit.getBatchStatus(input.variant, input.batchId)).to.equal(3n);
   });
 
   it("getBatchAudit returns correct values", async function () {
@@ -164,7 +300,7 @@ describe("BatchAudit", function () {
     await (await recordBatch(batchAudit, input)).wait();
 
     await expect(recordBatch(batchAudit, input)).to.be.revertedWith(
-      "audit record already exists"
+      "batch lifecycle already exists"
     );
   });
 
@@ -213,8 +349,14 @@ describe("BatchAudit", function () {
 
   it("rejects zero resultRowHash", async function () {
     const { batchAudit } = await deployBatchAudit();
-    await expect(recordBatch(batchAudit, validRecord({
+    const input = validRecord({
       resultRowHash: ethers.ZeroHash
-    }))).to.be.revertedWith("resultRowHash is required");
+    });
+    await (await batchAudit.openBatch(input.variant, input.batchId, input.ordersFileHash)).wait();
+    await expect(batchAudit.closeBatch(
+      input.variant,
+      input.batchId,
+      input.resultRowHash
+    )).to.be.revertedWith("resultCommitment is required");
   });
 });

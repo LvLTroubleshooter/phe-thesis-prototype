@@ -71,6 +71,7 @@ DEFAULT_BLOCKCHAIN_BATCH_EVIDENCE_DIR = Path(
 )
 DEFAULT_CONFIRMATIONS = 2
 DEFAULT_SUBMISSION_MODE = "sequential"
+DEFAULT_TRANSACTION_TIMEOUT_S = 180
 SUBMISSION_MODES = {"sequential", "burst"}
 
 BATCH_RECORD_FIELDS = {
@@ -127,6 +128,42 @@ def load_deployment(deployment_path: str | Path = DEFAULT_DEPLOYMENT_PATH) -> di
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def validate_deployment_on_chain(
+    web3: Web3,
+    deployment: dict[str, Any],
+    contract_address: str,
+) -> None:
+    """Validate deployment metadata against the currently running local chain."""
+    code = web3.eth.get_code(contract_address)
+    if code in (b"", b"\x00") or code.hex() in {"", "0x"}:
+        raise RuntimeError(
+            "Deployment metadata exists, but no contract code was found at this address. "
+            "The local Hardhat chain may have been restarted. Redeploy the contract with: "
+            "cd blockchain && npx hardhat run scripts/deploy.js --network localhost"
+        )
+
+    deployment_tx_hash = deployment.get("deploymentTransactionHash")
+    if deployment_tx_hash:
+        try:
+            receipt = web3.eth.get_transaction_receipt(deployment_tx_hash)
+        except Exception as error:
+            raise RuntimeError(
+                "Deployment transaction from metadata was not found on the current chain. "
+                "The local Hardhat chain may have been restarted. Redeploy BatchAudit."
+            ) from error
+        if receipt is None:
+            raise RuntimeError(
+                "Deployment transaction from metadata was not found on the current chain. "
+                "The local Hardhat chain may have been restarted. Redeploy BatchAudit."
+            )
+        deployment_block = deployment.get("deploymentBlockNumber")
+        if deployment_block is not None and int(receipt["blockNumber"]) != int(deployment_block):
+            raise RuntimeError(
+                "Deployment metadata block number does not match the on-chain deployment receipt. "
+                "Redeploy BatchAudit before running the blockchain experiment."
+            )
+
+
 def connect_to_batch_audit(
     deployment_path: str | Path = DEFAULT_DEPLOYMENT_PATH,
     rpc_url: str | None = None,
@@ -151,14 +188,32 @@ def connect_to_batch_audit(
     accounts = web3.eth.accounts
     if not accounts:
         raise RuntimeError("No unlocked local blockchain accounts are available")
+    operator_address = deployment.get("operatorAddress")
+    if operator_address:
+        operator_address = Web3.to_checksum_address(operator_address)
+        unlocked_accounts = {
+            Web3.to_checksum_address(account): account for account in accounts
+        }
+        if operator_address not in unlocked_accounts:
+            raise RuntimeError(
+                f"Configured operator account is not unlocked on the local chain: {operator_address}"
+            )
+        account = unlocked_accounts[operator_address]
+    else:
+        account = accounts[0]
 
     address = Web3.to_checksum_address(deployment["address"])
+    validate_deployment_on_chain(web3, deployment, address)
     contract = web3.eth.contract(address=address, abi=deployment["abi"])
+    if hasattr(contract.functions, "operators") and not contract.functions.operators(account).call():
+        raise RuntimeError(
+            f"Configured account is not authorised as a BatchAudit operator: {account}"
+        )
     return BlockchainConnection(
         web3=web3,
         contract=contract,
         deployment=deployment,
-        account=accounts[0],
+        account=account,
     )
 
 
@@ -268,12 +323,147 @@ def wait_for_confirmations(
     receipt_block_number: int,
     confirmations: int,
     poll_interval_s: float = 1.0,
+    timeout_s: float = DEFAULT_TRANSACTION_TIMEOUT_S,
 ) -> int:
     """Wait until the requested confirmation depth is reached."""
+    started_at = perf_counter()
     target_block = receipt_block_number + max(confirmations, 0)
     while web3.eth.block_number < target_block:
+        if perf_counter() - started_at > timeout_s:
+            raise TimeoutError(
+                f"Timed out waiting for {confirmations} confirmations after block {receipt_block_number}"
+            )
         sleep(poll_interval_s)
     return int(web3.eth.block_number)
+
+
+def failed_blockchain_result(
+    *,
+    connection: BlockchainConnection,
+    error_type: str,
+    failed_at_stage: str,
+    revert_reason: str,
+    confirmations: int,
+    submission_mode: str,
+    tx_hash_if_available: str = "",
+    correctness_pass: bool = False,
+) -> dict[str, Any]:
+    """Build a consistent failed blockchain audit result."""
+    current_block = int(connection.web3.eth.block_number)
+    return {
+        "record_status": "failed",
+        "correctness_pass": correctness_pass,
+        "blockchain_transaction_runtime_ms": 0.0,
+        "gas_used": 0,
+        "transaction_hash": "",
+        "block_number": current_block,
+        "effective_gas_price": 0,
+        "submitter": connection.account,
+        "tx_submitted_at_wall_time": "",
+        "tx_mined_at_wall_time": "",
+        "tx_confirmed_at_wall_time": "",
+        "tx_submission_time_s": 0.0,
+        "tx_submission_to_mined_s": 0.0,
+        "tx_mined_to_confirmed_s": 0.0,
+        "tx_total_confirmation_s": 0.0,
+        "pending_block_distance": 0,
+        "included_block_number": current_block,
+        "confirmed_at_block_number": current_block,
+        "included_block_timestamp": 0,
+        "confirmed_block_timestamp": 0,
+        "base_fee_per_gas": 0,
+        "max_fee_per_gas": 0,
+        "max_priority_fee_per_gas": 0,
+        "block_gas_limit": 0,
+        "block_gas_used": 0,
+        "block_gas_used_percent": 0.0,
+        "transaction_index": 0,
+        "nonce": 0,
+        "target_confirmations": confirmations,
+        "submission_mode": submission_mode,
+        "revert_reason_if_failed": revert_reason,
+        "error_type": error_type,
+        "failed_at_stage": failed_at_stage,
+        "tx_hash_if_available": tx_hash_if_available,
+        "blockchain_tx_count": 0,
+    }
+
+
+def transact_and_measure(
+    connection: BlockchainConnection,
+    function_call: Any,
+    confirmations: int,
+) -> dict[str, Any]:
+    """Submit one contract transaction and return lifecycle/gas metrics."""
+    web3 = connection.web3
+    tx_started_at = perf_counter()
+    tx_submitted_at_wall_time = utc_now_iso()
+    submitted_at_block_number = int(web3.eth.block_number)
+    submit_started_at = perf_counter()
+    tx_hash = function_call.transact({"from": connection.account})
+    tx_submission_time_s = perf_counter() - submit_started_at
+
+    receipt = web3.eth.wait_for_transaction_receipt(
+        tx_hash,
+        timeout=DEFAULT_TRANSACTION_TIMEOUT_S,
+    )
+    tx_mined_at_wall_time = utc_now_iso()
+    mined_at = perf_counter()
+
+    receipt_block_number = int(receipt["blockNumber"])
+    confirmed_block_number = wait_for_confirmations(
+        web3,
+        receipt_block_number,
+        confirmations,
+        timeout_s=DEFAULT_TRANSACTION_TIMEOUT_S,
+    )
+    tx_confirmed_at_wall_time = utc_now_iso()
+    tx_total_confirmation_s = perf_counter() - tx_started_at
+    tx_submission_to_mined_s = mined_at - tx_started_at
+    tx_mined_to_confirmed_s = tx_total_confirmation_s - tx_submission_to_mined_s
+
+    included_block_timestamp = block_timestamp(web3, receipt_block_number)
+    confirmed_block_timestamp = block_timestamp(web3, confirmed_block_number)
+    block_gas_limit = block_metric(web3, receipt_block_number, "gasLimit")
+    block_gas_used = block_metric(web3, receipt_block_number, "gasUsed")
+    base_fee_per_gas = block_metric(web3, receipt_block_number, "baseFeePerGas")
+    max_fee_per_gas = transaction_metric(web3, tx_hash, "maxFeePerGas")
+    max_priority_fee_per_gas = transaction_metric(web3, tx_hash, "maxPriorityFeePerGas")
+    status_code = int(receipt.get("status", 0))
+    return {
+        "status_code": status_code,
+        "blockchain_transaction_runtime_ms": seconds_to_milliseconds(tx_total_confirmation_s),
+        "gas_used": int(receipt["gasUsed"]),
+        "transaction_hash": receipt["transactionHash"].hex(),
+        "block_number": receipt_block_number,
+        "effective_gas_price": int(receipt.get("effectiveGasPrice", 0)),
+        "tx_submitted_at_wall_time": tx_submitted_at_wall_time,
+        "tx_mined_at_wall_time": tx_mined_at_wall_time,
+        "tx_confirmed_at_wall_time": tx_confirmed_at_wall_time,
+        "tx_submission_time_s": tx_submission_time_s,
+        "tx_submission_to_mined_s": tx_submission_to_mined_s,
+        "tx_mined_to_confirmed_s": tx_mined_to_confirmed_s,
+        "tx_total_confirmation_s": tx_total_confirmation_s,
+        "pending_block_distance": max(receipt_block_number - submitted_at_block_number, 0),
+        "included_block_number": receipt_block_number,
+        "confirmed_at_block_number": confirmed_block_number,
+        "included_block_timestamp": included_block_timestamp,
+        "confirmed_block_timestamp": confirmed_block_timestamp,
+        "base_fee_per_gas": base_fee_per_gas,
+        "max_fee_per_gas": max_fee_per_gas,
+        "max_priority_fee_per_gas": max_priority_fee_per_gas,
+        "block_gas_limit": block_gas_limit,
+        "block_gas_used": block_gas_used,
+        "block_gas_used_percent": (block_gas_used / block_gas_limit * 100)
+        if block_gas_limit
+        else 0.0,
+        "transaction_index": int(receipt.get("transactionIndex", 0)),
+        "nonce": transaction_metric(web3, tx_hash, "nonce"),
+        "revert_reason_if_failed": "" if status_code == 1 else "transaction reverted",
+        "error_type": "" if status_code == 1 else "transaction_reverted",
+        "failed_at_stage": "",
+        "tx_hash_if_available": receipt["transactionHash"].hex(),
+    }
 
 
 def record_plaintext_batch_audit(
@@ -296,6 +486,19 @@ def record_plaintext_batch_audit(
     if contract.functions.batchExists(PLAINTEXT_BLOCKCHAIN_VARIANT, batch_id).call():
         record = contract.functions.getBatchAudit(PLAINTEXT_BLOCKCHAIN_VARIANT, batch_id).call()
         correctness_pass = blockchain_record_matches(record, row, hashes, result_row_hash)
+        if not correctness_pass:
+            return failed_blockchain_result(
+                connection=connection,
+                error_type="duplicate_batch_id",
+                failed_at_stage="precheck",
+                revert_reason=(
+                    "audit record already exists for this variant and batch_id, "
+                    "but stored on-chain values do not match the current off-chain evidence"
+                ),
+                confirmations=confirmations,
+                submission_mode=submission_mode,
+                correctness_pass=False,
+            )
         return {
             "record_status": "already_exists",
             "correctness_pass": correctness_pass,
@@ -328,9 +531,23 @@ def record_plaintext_batch_audit(
             "target_confirmations": confirmations,
             "submission_mode": submission_mode,
             "revert_reason_if_failed": "",
+            "error_type": "",
+            "failed_at_stage": "",
+            "tx_hash_if_available": "",
+            "blockchain_tx_count": 0,
         }
 
-    function_call = contract.functions.recordBatchAudit(
+    open_call = contract.functions.openBatch(
+        PLAINTEXT_BLOCKCHAIN_VARIANT,
+        batch_id,
+        hex_digest_to_bytes32(hashes["orders_file_hash"]),
+    )
+    close_call = contract.functions.closeBatch(
+        PLAINTEXT_BLOCKCHAIN_VARIANT,
+        batch_id,
+        hex_digest_to_bytes32(result_row_hash),
+    )
+    audit_call = contract.functions.recordBatchAudit(
         PLAINTEXT_BLOCKCHAIN_VARIANT,
         batch_id,
         int(row["batch_size"]),
@@ -344,73 +561,83 @@ def record_plaintext_batch_audit(
         hex_digest_to_bytes32(result_row_hash),
     )
 
-    tx_started_at = perf_counter()
-    tx_submitted_at_wall_time = utc_now_iso()
-    submitted_at_block_number = int(web3.eth.block_number)
-    submit_started_at = perf_counter()
-    tx_hash = function_call.transact({"from": connection.account})
-    tx_submission_time_s = perf_counter() - submit_started_at
-
-    receipt = web3.eth.wait_for_transaction_receipt(tx_hash)
-    tx_mined_at_wall_time = utc_now_iso()
-    mined_at = perf_counter()
-
-    receipt_block_number = int(receipt["blockNumber"])
-    confirmed_block_number = wait_for_confirmations(
-        web3,
-        receipt_block_number,
-        confirmations,
-    )
-    tx_confirmed_at_wall_time = utc_now_iso()
-    tx_total_confirmation_s = perf_counter() - tx_started_at
-    tx_submission_to_mined_s = mined_at - tx_started_at
-    tx_mined_to_confirmed_s = tx_total_confirmation_s - tx_submission_to_mined_s
-
-    included_block_timestamp = block_timestamp(web3, receipt_block_number)
-    confirmed_block_timestamp = block_timestamp(web3, confirmed_block_number)
-    block_gas_limit = block_metric(web3, receipt_block_number, "gasLimit")
-    block_gas_used = block_metric(web3, receipt_block_number, "gasUsed")
-    base_fee_per_gas = block_metric(web3, receipt_block_number, "baseFeePerGas")
-    max_fee_per_gas = transaction_metric(web3, tx_hash, "maxFeePerGas")
-    max_priority_fee_per_gas = transaction_metric(web3, tx_hash, "maxPriorityFeePerGas")
+    try:
+        open_result = transact_and_measure(connection, open_call, confirmations)
+        close_result = transact_and_measure(connection, close_call, confirmations)
+        audit_result = transact_and_measure(connection, audit_call, confirmations)
+    except TimeoutError as error:
+        return failed_blockchain_result(
+            connection=connection,
+            error_type="transaction_timeout",
+            failed_at_stage="transaction_lifecycle",
+            revert_reason=str(error),
+            confirmations=confirmations,
+            submission_mode=submission_mode,
+        )
+    except ValueError as error:
+        return failed_blockchain_result(
+            connection=connection,
+            error_type="transaction_reverted",
+            failed_at_stage="transaction_lifecycle",
+            revert_reason=str(error),
+            confirmations=confirmations,
+            submission_mode=submission_mode,
+        )
+    except Exception as error:
+        return failed_blockchain_result(
+            connection=connection,
+            error_type=type(error).__name__,
+            failed_at_stage="transaction_lifecycle",
+            revert_reason=str(error),
+            confirmations=confirmations,
+            submission_mode=submission_mode,
+        )
+    lifecycle_results = [open_result, close_result, audit_result]
     record = contract.functions.getBatchAudit(PLAINTEXT_BLOCKCHAIN_VARIANT, batch_id).call()
     correctness_pass = blockchain_record_matches(record, row, hashes, result_row_hash)
-    status_code = int(receipt.get("status", 0))
+    status_code = int(audit_result["status_code"])
+    total_runtime_ms = sum(
+        float(result["blockchain_transaction_runtime_ms"])
+        for result in lifecycle_results
+    )
+    total_gas_used = sum(int(result["gas_used"]) for result in lifecycle_results)
 
     return {
         "record_status": "recorded" if status_code == 1 else "failed",
         "correctness_pass": correctness_pass,
-        "blockchain_transaction_runtime_ms": seconds_to_milliseconds(tx_total_confirmation_s),
-        "gas_used": int(receipt["gasUsed"]),
-        "transaction_hash": receipt["transactionHash"].hex(),
-        "block_number": receipt_block_number,
-        "effective_gas_price": int(receipt.get("effectiveGasPrice", 0)),
+        "blockchain_transaction_runtime_ms": total_runtime_ms,
+        "gas_used": total_gas_used,
+        "transaction_hash": audit_result["transaction_hash"],
+        "block_number": audit_result["block_number"],
+        "effective_gas_price": audit_result["effective_gas_price"],
         "submitter": connection.account,
-        "tx_submitted_at_wall_time": tx_submitted_at_wall_time,
-        "tx_mined_at_wall_time": tx_mined_at_wall_time,
-        "tx_confirmed_at_wall_time": tx_confirmed_at_wall_time,
-        "tx_submission_time_s": tx_submission_time_s,
-        "tx_submission_to_mined_s": tx_submission_to_mined_s,
-        "tx_mined_to_confirmed_s": tx_mined_to_confirmed_s,
-        "tx_total_confirmation_s": tx_total_confirmation_s,
-        "pending_block_distance": max(receipt_block_number - submitted_at_block_number, 0),
-        "included_block_number": receipt_block_number,
-        "confirmed_at_block_number": confirmed_block_number,
-        "included_block_timestamp": included_block_timestamp,
-        "confirmed_block_timestamp": confirmed_block_timestamp,
-        "base_fee_per_gas": base_fee_per_gas,
-        "max_fee_per_gas": max_fee_per_gas,
-        "max_priority_fee_per_gas": max_priority_fee_per_gas,
-        "block_gas_limit": block_gas_limit,
-        "block_gas_used": block_gas_used,
-        "block_gas_used_percent": (block_gas_used / block_gas_limit * 100)
-        if block_gas_limit
-        else 0.0,
-        "transaction_index": int(receipt.get("transactionIndex", 0)),
-        "nonce": transaction_metric(web3, tx_hash, "nonce"),
+        "tx_submitted_at_wall_time": open_result["tx_submitted_at_wall_time"],
+        "tx_mined_at_wall_time": audit_result["tx_mined_at_wall_time"],
+        "tx_confirmed_at_wall_time": audit_result["tx_confirmed_at_wall_time"],
+        "tx_submission_time_s": sum(float(result["tx_submission_time_s"]) for result in lifecycle_results),
+        "tx_submission_to_mined_s": sum(float(result["tx_submission_to_mined_s"]) for result in lifecycle_results),
+        "tx_mined_to_confirmed_s": sum(float(result["tx_mined_to_confirmed_s"]) for result in lifecycle_results),
+        "tx_total_confirmation_s": total_runtime_ms / 1_000,
+        "pending_block_distance": audit_result["pending_block_distance"],
+        "included_block_number": audit_result["included_block_number"],
+        "confirmed_at_block_number": audit_result["confirmed_at_block_number"],
+        "included_block_timestamp": audit_result["included_block_timestamp"],
+        "confirmed_block_timestamp": audit_result["confirmed_block_timestamp"],
+        "base_fee_per_gas": audit_result["base_fee_per_gas"],
+        "max_fee_per_gas": audit_result["max_fee_per_gas"],
+        "max_priority_fee_per_gas": audit_result["max_priority_fee_per_gas"],
+        "block_gas_limit": audit_result["block_gas_limit"],
+        "block_gas_used": audit_result["block_gas_used"],
+        "block_gas_used_percent": audit_result["block_gas_used_percent"],
+        "transaction_index": audit_result["transaction_index"],
+        "nonce": audit_result["nonce"],
         "target_confirmations": confirmations,
         "submission_mode": submission_mode,
-        "revert_reason_if_failed": "" if status_code == 1 else "transaction reverted",
+        "revert_reason_if_failed": audit_result["revert_reason_if_failed"],
+        "error_type": audit_result["error_type"],
+        "failed_at_stage": audit_result["failed_at_stage"],
+        "tx_hash_if_available": audit_result["tx_hash_if_available"],
+        "blockchain_tx_count": len(lifecycle_results),
     }
 
 
@@ -475,7 +702,7 @@ def build_plaintext_blockchain_raw_run_row(
         "matched_trades_count": int(result["executed_trade_count"]),
         "unmatched_orders_count": len(unmatched_orders),
         "correctness_pass": matched_volume == trade_volume and bool(tx_result["correctness_pass"]) if tx_result else matched_volume == trade_volume,
-        "blockchain_tx_count": 1 if tx_result and tx_result["transaction_hash"] else 0,
+        "blockchain_tx_count": int(tx_result.get("blockchain_tx_count", 1)) if tx_result and tx_result["transaction_hash"] else 0,
         "blockchain_gas_used_total": int(tx_result["gas_used"]) if tx_result else 0,
         "blockchain_block_number": int(tx_result["block_number"]) if tx_result else 0,
         "blockchain_transaction_hash": tx_result["transaction_hash"] if tx_result else "",
@@ -524,7 +751,7 @@ def build_plaintext_blockchain_metric_row(
         "unmatched_orders_count": int(metric["unmatched_orders_count"]),
         "correctness_pass": bool(metric["correctness_pass"])
         and bool(tx_result["correctness_pass"]),
-        "blockchain_tx_count": 1 if tx_result["transaction_hash"] else 0,
+        "blockchain_tx_count": int(tx_result.get("blockchain_tx_count", 1)) if tx_result["transaction_hash"] else 0,
         "blockchain_gas_used_total": int(tx_result["gas_used"]),
         "blockchain_block_number": int(tx_result["block_number"]),
         "blockchain_transaction_hash": tx_result["transaction_hash"],
@@ -815,6 +1042,12 @@ def run_plaintext_blockchain_audit(
                 "target_confirmations": tx_result.get("target_confirmations", confirmations),
                 "submission_mode": tx_result.get("submission_mode", submission_mode),
                 "revert_reason_if_failed": tx_result.get("revert_reason_if_failed", ""),
+                "error_type": tx_result.get("error_type", ""),
+                "failed_at_stage": tx_result.get("failed_at_stage", ""),
+                "tx_hash_if_available": tx_result.get(
+                    "tx_hash_if_available",
+                    tx_result.get("transaction_hash", ""),
+                ),
                 "status": "success" if correctness_pass else "failed",
                 "created_at": utc_now_iso(),
             }

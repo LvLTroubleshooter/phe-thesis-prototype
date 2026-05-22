@@ -397,6 +397,38 @@ tr:last-child td {
   color: #1747a6;
 }
 
+.gas-chart {
+  display: grid;
+  gap: 9px;
+  padding: 12px 14px 14px;
+}
+
+.gas-bar-row {
+  display: grid;
+  grid-template-columns: 62px minmax(120px, 1fr) 92px;
+  gap: 10px;
+  align-items: center;
+  color: #475569;
+  font-size: 12px;
+}
+
+.gas-track {
+  height: 10px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #edf2f7;
+}
+
+.gas-bar {
+  height: 100%;
+  border-radius: inherit;
+  background: #cbd5e1;
+}
+
+.gas-bar.active {
+  background: #1d4ed8;
+}
+
 .filters {
   display: grid;
   grid-template-columns: repeat(3, minmax(160px, 1fr));
