@@ -1,0 +1,2 @@
+batch_id,batch_size,seed,dataset_path,input_orders_count,buy_orders_count,sell_orders_count,buy_volume,sell_volume,input_hash,created_at
+batch_0001,4,7,results/datasets/synthetic_orders/batch_0001.csv,4,4,0,1296,0,9b93ab23332a0eef177c3bbce5eec628719ec1e3dc1227fa2f6bc09bfef76037,2026-06-26T16:37:43.676719+00:00

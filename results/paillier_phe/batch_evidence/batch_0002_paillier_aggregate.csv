@@ -1,0 +1,2 @@
+experiment_name,variant,batch_id,batch_size,buy_volume,sell_volume,matched_volume,reference_buy_volume,reference_sell_volume,reference_matched_volume,correctness_pass,ciphertext_size_bytes,encryption_runtime_s,encrypted_computation_runtime_s,decryption_runtime_s,created_at
+paillier_phe,paillier_phe,batch_0002,500,131747,123887,123887,131747,123887,123887,True,511991,62.977959272000135,0.15767634899998484,0.036683445000107895,2026-06-10T13:06:01.837726+00:00

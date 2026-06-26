@@ -1,0 +1,5 @@
+experiment_name,batch_summary_path,raw_runs_path,included,summary_row_count,raw_run_row_count
+paillier_phe,results/paillier_phe/csv/batch_summary.csv,results/paillier_phe/csv/raw_runs.csv,True,5,30
+paillier_phe_blockchain,results/paillier_phe_blockchain/csv/batch_summary.csv,results/paillier_phe_blockchain/csv/raw_runs.csv,True,5,30
+plaintext_baseline,results/plaintext_baseline/csv/batch_summary.csv,results/plaintext_baseline/csv/raw_runs.csv,True,5,30
+plaintext_blockchain,results/plaintext_blockchain/csv/batch_summary.csv,results/plaintext_blockchain/csv/raw_runs.csv,True,5,30

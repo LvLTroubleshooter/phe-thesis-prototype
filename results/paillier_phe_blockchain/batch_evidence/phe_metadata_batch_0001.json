@@ -1,0 +1,14 @@
+{
+  "batch_id": "batch_0001",
+  "batch_size": 100,
+  "ciphertext_base": 16,
+  "created_at": "2026-06-10T18:38:24.263874+00:00",
+  "encrypted_order_count": 100,
+  "evidence_format": "jsonl_encrypted_orders_plus_json_aggregate",
+  "individual_plaintext_prices_stored": false,
+  "individual_plaintext_quantities_stored": false,
+  "key_size_bits": 2048,
+  "private_key_material_stored": false,
+  "public_key_n_hash": "fb2e51a947c62f03056e49290f4b264b8ade6c96bb09f20ec68aba9f18a8fe24",
+  "variant": "paillier_phe_blockchain"
+}
