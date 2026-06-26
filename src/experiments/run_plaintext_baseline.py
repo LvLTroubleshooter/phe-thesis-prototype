@@ -466,6 +466,7 @@ def build_plaintext_raw_run_row(
         "is_warmup": is_warmup,
         "seed": seed,
         "input_hash": input_hash,
+        "ciphertext_size_bytes": 0,
         "matching_runtime_s": matching_runtime_s,
         "encryption_runtime_s": 0.0,
         "encrypted_computation_runtime_s": 0.0,

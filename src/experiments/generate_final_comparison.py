@@ -151,9 +151,11 @@ def create_overhead_breakdown(summaries: pd.DataFrame) -> pd.DataFrame:
         total = row["total_runtime_s_mean"] or 0
         components = {
             "matching_runtime_s_mean": row["matching_runtime_s_mean"],
-            "encryption_runtime_s_mean": 0,
-            "encrypted_computation_runtime_s_mean": 0,
-            "decryption_runtime_s_mean": 0,
+            "encryption_runtime_s_mean": row["encryption_runtime_s_mean"],
+            "encrypted_computation_runtime_s_mean": row[
+                "encrypted_computation_runtime_s_mean"
+            ],
+            "decryption_runtime_s_mean": row["decryption_runtime_s_mean"],
             "evidence_write_runtime_s_mean": row["audit_overhead_s_mean"] - row["blockchain_runtime_s_mean"],
             "hashing_runtime_s_mean": 0,
             "blockchain_runtime_s_mean": row["blockchain_runtime_s_mean"],
@@ -166,9 +168,9 @@ def create_overhead_breakdown(summaries: pd.DataFrame) -> pd.DataFrame:
                 **components,
                 "total_runtime_s_mean": total,
                 "matching_percent": percentage(components["matching_runtime_s_mean"], total),
-                "encryption_percent": 0,
-                "encrypted_computation_percent": 0,
-                "decryption_percent": 0,
+                "encryption_percent": percentage(components["encryption_runtime_s_mean"], total),
+                "encrypted_computation_percent": percentage(components["encrypted_computation_runtime_s_mean"], total),
+                "decryption_percent": percentage(components["decryption_runtime_s_mean"], total),
                 "evidence_write_percent": percentage(components["evidence_write_runtime_s_mean"], total),
                 "hashing_percent": 0,
                 "blockchain_percent": percentage(components["blockchain_runtime_s_mean"], total),
@@ -318,7 +320,15 @@ def create_figures(
         return figures
 
     figures.append(line_by_variant(comparison, "total_runtime_s_mean", "Total runtime (s)", path / "01_total_runtime_comparison.png"))
-    figures.append(line_by_variant(comparison, "throughput_orders_per_second_mean", "Orders per second", path / "02_throughput_comparison.png"))
+    figures.append(
+        line_by_variant(
+            comparison,
+            "throughput_orders_per_second_mean",
+            "Orders per second (log scale)",
+            path / "02_throughput_comparison.png",
+            log_y=True,
+        )
+    )
     figures.append(stacked_runtime(overhead, path / "03_runtime_component_breakdown.png"))
     figures.append(line_by_variant(comparison, "relative_slowdown_vs_plaintext", "Slowdown vs plaintext (x)", path / "04_relative_slowdown_vs_baseline.png"))
     figures.append(bar_by_batch(blockchain, "audit_overhead_percent_mean", "Audit overhead (%)", path / "05_audit_overhead_percentage.png"))
@@ -329,14 +339,23 @@ def create_figures(
     return figures
 
 
-def line_by_variant(data: pd.DataFrame, column: str, ylabel: str, output_path: Path) -> Path:
+def line_by_variant(
+    data: pd.DataFrame,
+    column: str,
+    ylabel: str,
+    output_path: Path,
+    *,
+    log_y: bool = False,
+) -> Path:
     fig, ax = plt.subplots(figsize=(10, 6))
     for variant, rows in data.groupby("variant"):
         ordered = rows.sort_values("batch_size")
         ax.plot(ordered["batch_size"], ordered[column], marker="o", label=variant)
     ax.set_xlabel("Batch size")
     ax.set_ylabel(ylabel)
-    ax.grid(alpha=0.3)
+    if log_y and (data[column] > 0).any():
+        ax.set_yscale("log")
+    ax.grid(alpha=0.3, which="both")
     ax.legend()
     fig.tight_layout()
     fig.savefig(output_path, dpi=200)

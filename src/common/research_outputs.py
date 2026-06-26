@@ -35,6 +35,7 @@ RAW_RUN_COLUMNS = [
     "is_warmup",
     "seed",
     "input_hash",
+    "ciphertext_size_bytes",
     "matching_runtime_s",
     "encryption_runtime_s",
     "encrypted_computation_runtime_s",
@@ -64,11 +65,18 @@ BATCH_SUMMARY_COLUMNS = [
     "measured_runs",
     "warmup_runs",
     "input_hash",
+    "ciphertext_size_bytes",
     "matching_runtime_s_mean",
     "matching_runtime_s_median",
     "matching_runtime_s_std",
     "matching_runtime_s_min",
     "matching_runtime_s_max",
+    "encryption_runtime_s_mean",
+    "encryption_runtime_s_median",
+    "encrypted_computation_runtime_s_mean",
+    "encrypted_computation_runtime_s_median",
+    "decryption_runtime_s_mean",
+    "decryption_runtime_s_median",
     "batch_wall_clock_runtime_s",
     "experiment_wall_clock_runtime_s",
     "command_wall_clock_runtime_s",
@@ -211,6 +219,15 @@ def summarize_measured_runs(
 
     for _, group in measured.groupby("batch_id", sort=True):
         matching = group["matching_runtime_s"].astype(float)
+        encryption = group["encryption_runtime_s"].astype(float)
+        encrypted_computation = group["encrypted_computation_runtime_s"].astype(float)
+        decryption = group["decryption_runtime_s"].astype(float)
+        ciphertext_size = pd.to_numeric(
+            group["ciphertext_size_bytes"]
+            if "ciphertext_size_bytes" in group.columns
+            else pd.Series([0] * len(group)),
+            errors="coerce",
+        ).fillna(0)
         total = group["total_runtime_s"].astype(float)
         throughput = group["throughput_orders_per_second"].astype(float)
         audit = (
@@ -231,11 +248,18 @@ def summarize_measured_runs(
                 "measured_runs": measured_runs,
                 "warmup_runs": warmup_runs,
                 "input_hash": group["input_hash"].iloc[0],
+                "ciphertext_size_bytes": int(ciphertext_size.max()),
                 "matching_runtime_s_mean": fmean(matching),
                 "matching_runtime_s_median": median(matching),
                 "matching_runtime_s_std": std_or_zero(matching),
                 "matching_runtime_s_min": min(matching),
                 "matching_runtime_s_max": max(matching),
+                "encryption_runtime_s_mean": fmean(encryption),
+                "encryption_runtime_s_median": median(encryption),
+                "encrypted_computation_runtime_s_mean": fmean(encrypted_computation),
+                "encrypted_computation_runtime_s_median": median(encrypted_computation),
+                "decryption_runtime_s_mean": fmean(decryption),
+                "decryption_runtime_s_median": median(decryption),
                 "total_runtime_s_mean": fmean(total),
                 "total_runtime_s_median": median(total),
                 "total_runtime_s_std": std_or_zero(total),
