@@ -29,7 +29,8 @@ The blockchain variants also require a running and freshly deployed local Hardha
 
 ## Unavailable evidence
 
-- No expected local batch-evidence file referenced by this result snapshot is missing. The plaintext baseline has no separate `batch_evidence/` directory: its evidence is consolidated in `csv/trades.csv` and `csv/unmatched_orders.csv`, with inputs under `datasets/`.
+- The archived results contain the encrypted-evidence index, but the 15 indexed JSONL/JSON files from the Paillier PHE + blockchain variant were not retained. Therefore, their hashes and storage sizes could not be recomputed.
+- The plaintext baseline does not produce a separate `batch_evidence/` directory. Its evidence is consolidated in `csv/trades.csv` and `csv/unmatched_orders.csv`, with inputs stored under `datasets/`.
 - Paillier private-key material is intentionally not stored; only public-key hashes and the evidence needed to check decrypted aggregate totals are included.
 - The historical Hardhat chain state and generated deployment JSON files are not committed because the local chain is ephemeral. Transaction hashes and receipt metrics remain in the blockchain audit CSVs, but the old transactions cannot be queried unless that original node state was preserved separately.
 - `paillier_phe_blockchain/csv/blockchain_audit.csv` records a failed `recordBatchAudit` attempt for `batch_0001` (`existing record does not match evidence`); therefore, a successful on-chain audit record for that attempt is unavailable.
