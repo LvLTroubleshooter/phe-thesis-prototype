@@ -35,7 +35,8 @@ blockchain/deployments/
 frontend/public/deployments/
 
 # Experiment outputs and generated datasets
-results/
+results/*
+!results/README.md
 data/
 
 # Local environment and secrets
